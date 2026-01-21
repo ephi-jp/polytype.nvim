@@ -47,7 +47,7 @@ function M.handle_key(key)
         local replacement = rule[2] -- 置換後の文字 (例: "á")
 
         -- 直前のテキストが suffix で終わっているか確認
-        if text_before:sub(-#suffix) == suffix then
+        if text_before:sub(col + 1 - #suffix) == suffix then
             -- マッチした場合:
             -- 1. suffixの文字数分バックスペース (<BS>) を生成
             -- 2. 置換後の文字を続ける
