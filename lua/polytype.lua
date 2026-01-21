@@ -7,13 +7,10 @@ local active_mode = nil
 -- 形式: [トリガーキー] = { { 前にある文字, 置換後の文字 }, ... }
 -- "前にある文字" が空文字列 "" の場合は、無条件で置換します（単一キー置換）
 local modes = {
-    hungarian = {
+    latin = {
         -- 'a' を打った時、直前が 'a;' なら 'á' にする (計3文字削除して置換ではない点に注意)
         -- ここでは「トリガーキーを含まない直前の文字列」を指定します。
-        ["a"] = { { "a;", "á" } }, 
-        ["e"] = { { "e;", "é" } },
-        ["o"] = { { "o;", "ó" } },
-        -- もし 'sz' を 's' にしたいなら: ["z"] = { { "s", "sz" } } など
+        ["a"] = { { "a;", "á" }, { "e;", "é" }, { "o;", "ó" } },
     },
     cyrillic = {
         -- 単発置換の例: z を打つと即座に з になる
@@ -21,26 +18,27 @@ local modes = {
         ["g"] = { { "", "г" } },
         ["d"] = { { "", "д" } },
         ["l"] = { { "", "л" } },
-        
-        -- 文脈依存の例: "y" と打った時、直前が "j" なら "й" にする ("jy" -> "й")
-        ["y"] = { { "j", "й" } },
-    }
+    },
 }
 
 -- ==========================================
 -- 2. ロジック: カーソル位置のチェックと置換生成
 -- ==========================================
 function M.handle_key(key)
-    if not active_mode then return key end
-    
+    if not active_mode then
+        return key
+    end
+
     local rules = modes[active_mode][key]
-    if not rules then return key end
+    if not rules then
+        return key
+    end
 
     -- 現在の行とカーソル位置を取得
     -- col は 0-indexed で、カーソルは「次の入力位置」にある
     local line = vim.api.nvim_get_current_line()
     local col = vim.api.nvim_win_get_cursor(0)[2]
-    
+
     -- カーソルより前のテキストを取得
     local text_before = line:sub(1, col)
 
@@ -54,7 +52,7 @@ function M.handle_key(key)
             -- 1. suffixの文字数分バックスペース (<BS>) を生成
             -- 2. 置換後の文字を続ける
             local backspaces = string.rep("<BS>", #suffix)
-            
+
             -- <BS>を特殊キーとして解釈させるため、termcodesに変換して返す
             return vim.api.nvim_replace_termcodes(backspaces .. replacement, true, true, true)
         end
@@ -69,7 +67,9 @@ end
 -- ==========================================
 local function set_mappings(mode_name)
     local rules = modes[mode_name]
-    if not rules then return end
+    if not rules then
+        return
+    end
 
     -- ルールに登録されている「トリガーキー」だけを expr マッピングする
     for key, _ in pairs(rules) do
@@ -81,7 +81,9 @@ local function set_mappings(mode_name)
 end
 
 local function clear_mappings(mode_name)
-    if not mode_name or not modes[mode_name] then return end
+    if not mode_name or not modes[mode_name] then
+        return
+    end
     for key, _ in pairs(modes[mode_name]) do
         pcall(vim.keymap.del, "i", key, { buffer = true })
     end
@@ -107,9 +109,16 @@ function M.disable()
 end
 
 function M.setup()
-    vim.api.nvim_create_user_command("ImeHu", function() M.enable("hungarian") end, {})
-    vim.api.nvim_create_user_command("ImeBg", function() M.enable("cyrillic") end, {})
-    vim.api.nvim_create_user_command("ImeOff", function() M.disable() end, {})
+    vim.api.nvim_create_user_command("ImeL", function()
+        M.enable("latin")
+    end, {})
+    vim.api.nvim_create_user_command("ImeC", function()
+        M.enable("cyrillic")
+    end, {})
+    vim.api.nvim_create_user_command("ImeOff", function()
+        M.disable()
+    end, {})
 end
 
 return M
+
