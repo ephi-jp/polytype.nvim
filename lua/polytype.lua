@@ -53,8 +53,7 @@ function M.handle_key(key)
             -- 2. 置換後の文字を続ける
             local backspaces = string.rep("<BS>", #suffix)
 
-            -- <BS>を特殊キーとして解釈させるため、termcodesに変換して返す
-            return vim.api.nvim_replace_termcodes(backspaces .. replacement, true, true, true)
+            return backspaces .. replacement
         end
     end
 
@@ -121,4 +120,3 @@ function M.setup()
 end
 
 return M
-
