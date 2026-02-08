@@ -1,122 +1,141 @@
 local M = {}
-local active_mode = nil
+local cache = {}
+local active_mode = {}
+local ffi = require("ffi")
 
--- ==========================================
--- 1. 設定: モードごとの置換ルール
--- ==========================================
--- 形式: [トリガーキー] = { { 前にある文字, 置換後の文字 }, ... }
--- "前にある文字" が空文字列 "" の場合は、無条件で置換します（単一キー置換）
-local modes = {
-    latin = {
-        -- 'a' を打った時、直前が 'a;' なら 'á' にする (計3文字削除して置換ではない点に注意)
-        -- ここでは「トリガーキーを含まない直前の文字列」を指定します。
-        ["a"] = { { "a;", "á" }, { "e;", "é" }, { "o;", "ó" } },
-    },
-    cyrillic = {
-        -- 単発置換の例: z を打つと即座に з になる
-        ["z"] = { { "", "з" } },
-        ["g"] = { { "", "г" } },
-        ["d"] = { { "", "д" } },
-        ["l"] = { { "", "л" } },
-    },
-}
-
--- ==========================================
--- 2. ロジック: カーソル位置のチェックと置換生成
--- ==========================================
-function M.handle_key(key)
-    if not active_mode then
-        return key
+local function get_value(base, m, i)
+    local pos = (i - 1) / 2
+    local value = ffi.cast("uint8_t*", base)
+    if pos >= m then
+        return nil
     end
-
-    local rules = modes[active_mode][key]
-    if not rules then
-        return key
+    local h = value[pos]
+    local out_count = h % 16
+    if pos + out_count >= m then
+        return nil
     end
+    local bs_count = (h - out_count) / 16
+    local backspaces = string.rep("<BS>", bs_count)
+    local replacement = ffi.string(value + pos + 1, out_count)
+    return backspaces .. replacement
+end
 
-    -- 現在の行とカーソル位置を取得
-    -- col は 0-indexed で、カーソルは「次の入力位置」にある
+local function handle_key(key, i, n, m, check, base)
     local line = vim.api.nvim_get_current_line()
     local col = vim.api.nvim_win_get_cursor(0)[2]
+    local text_before = line:sub(math.max(1, col - 14), col)
 
-    -- カーソルより前のテキストを取得
-    local text_before = line:sub(1, col)
-
-    for _, rule in ipairs(rules) do
-        local suffix = rule[1] -- 前にあるべき文字 (例: "a;")
-        local replacement = rule[2] -- 置換後の文字 (例: "á")
-
-        -- 直前のテキストが suffix で終わっているか確認
-        if text_before:sub(col + 1 - #suffix) == suffix then
-            -- マッチした場合:
-            -- 1. suffixの文字数分バックスペース (<BS>) を生成
-            -- 2. 置換後の文字を続ける
-            local backspaces = string.rep("<BS>", #suffix)
-
-            return backspaces .. replacement
+    for j = 1, #text_before do
+        local c = text_before:byte(-j)
+        i = i + c
+        if i < 0 or i >= n or check[i] ~= c then
+            break
         end
+
+        i = base[i]
+
+        if i % 2 ~= 0 then
+            return get_value(base, m, i)
+        end
+        i = i / 2
     end
 
-    -- どのルールにもマッチしなければ、入力されたキーをそのまま返す
     return key
 end
 
--- ==========================================
--- 3. マッピング管理
--- ==========================================
-local function set_mappings(mode_name)
-    local rules = modes[mode_name]
-    if not rules then
-        return
+local function load_mapping(mode_name, datfile)
+    datfile = datfile or vim.api.nvim_get_runtime_file("data/polytype/" .. mode_name .. ".dat", false)[1]
+    local f = io.open(datfile, "r")
+    if not f then
+        return nil
+    end
+    local dat = f:read("*a")
+    f:close()
+
+    local header = ffi.cast("int32_t*", dat)
+    if #dat < 8 or header[0] ~= 0x00015450 then
+        return nil
     end
 
-    -- ルールに登録されている「トリガーキー」だけを expr マッピングする
-    for key, _ in pairs(rules) do
-        vim.keymap.set("i", key, function()
-            return M.handle_key(key)
-        end, { expr = true, buffer = true }) -- buffer=trueで現在のバッファのみに適用
-    end
-    print("Enabled mode: " .. mode_name)
+    local mapping = dat:sub(5)
+    cache[mode_name] = mapping
+    return mapping
 end
 
-local function clear_mappings(mode_name)
-    if not mode_name or not modes[mode_name] then
+local function set_mappings(mode_name, datfile)
+    local mapping = cache[mode_name] or load_mapping(mode_name, datfile)
+    if not mapping then
+        return false
+    end
+
+    local bufnr = vim.api.nvim_get_current_buf()
+    active_mode[bufnr] = mode_name
+
+    local header = ffi.cast("int16_t*", mapping)
+    local n = header[0]
+    local m = header[1]
+    local check = ffi.cast("uint8_t*", header + 2)
+    local base = ffi.cast("int16_t*", check + n)
+    local start = check[0]
+    for c = start, 127 do
+        local i = c - start
+        if i < n and check[i] == c then
+            local key = string.char(c)
+            i = base[i]
+            if i % 2 ~= 0 then
+                local value = get_value(base, m, i)
+                if value then
+                    vim.keymap.set("i", key, value, { buffer = true })
+                end
+            else
+                vim.keymap.set("i", key, function()
+                    return handle_key(key, i / 2, n, m, check, base)
+                end, { expr = true, buffer = bufnr })
+            end
+        end
+    end
+    return true
+end
+
+local function clear_mappings()
+    local bufnr = vim.api.nvim_get_current_buf()
+    local mapping = cache[active_mode[bufnr]]
+    if not mapping then
         return
     end
-    for key, _ in pairs(modes[mode_name]) do
-        pcall(vim.keymap.del, "i", key, { buffer = true })
+    local header = ffi.cast("int16_t*", mapping)
+    local n = header[0]
+    local check = ffi.cast("uint8_t*", header + 2)
+    local start = check[0]
+    for c = start, 127 do
+        local i = c - start
+        if i < n and check[i] == c then
+            local key = string.char(c)
+            pcall(vim.keymap.del, "i", key, { buffer = true })
+        end
+    end
+    active_mode[bufnr] = nil
+end
+
+function M.mode()
+    local bufnr = vim.api.nvim_get_current_buf()
+    return active_mode[bufnr]
+end
+
+function M.enable(mode_name, datfile)
+    clear_mappings()
+    if set_mappings(mode_name, datfile) then
+        print("PolyType mode: " .. mode_name)
     end
 end
 
--- ==========================================
--- 4. 公開コマンド
--- ==========================================
-function M.enable(mode_name)
-    if active_mode then
-        clear_mappings(active_mode)
-    end
-    active_mode = mode_name
-    set_mappings(mode_name)
+function M.enable_latin()
+    M.enable("latin")
 end
 
 function M.disable()
-    if active_mode then
-        clear_mappings(active_mode)
-        active_mode = nil
-        print("IME Disabled")
-    end
-end
-
-function M.setup()
-    vim.api.nvim_create_user_command("ImeL", function()
-        M.enable("latin")
-    end, {})
-    vim.api.nvim_create_user_command("ImeC", function()
-        M.enable("cyrillic")
-    end, {})
-    vim.api.nvim_create_user_command("ImeOff", function()
-        M.disable()
-    end, {})
+    clear_mappings()
+    print("PolyType Disabled")
 end
 
 return M
